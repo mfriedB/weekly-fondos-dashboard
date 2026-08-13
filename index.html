@@ -171,6 +171,18 @@
   tbody tr:hover{background:var(--blue-pale);}
   .fund-name{font-weight:600; color:var(--navy);}
   .fund-name-sub{font-weight:400; color:var(--muted); font-size:11.5px; margin-top:2px; line-height:1.3;}
+  /* Nombre de fondo con link al factsheet (cuando factsheets.json trae
+     un PDF para ese fondo). Mismo color que el texto normal por default
+     -no se ve como "link azul de internet"-, y solo se resalta al pasar
+     el mouse, con una flechita chica que indica que abre algo externo. */
+  .fund-name-link{color:inherit; text-decoration:none; cursor:pointer;}
+  .fund-name-link:hover{color:var(--blue); text-decoration:underline;}
+  .fund-name-link .fs-ic{font-size:11px; opacity:.55; margin-left:3px; text-decoration:none; display:inline-block;}
+  .fund-card-name-link{color:inherit; text-decoration:none;}
+  .fund-card-name-link:hover{text-decoration:underline;}
+  .modal-title-link{color:inherit; text-decoration:none; display:inline-flex; align-items:center; gap:5px;}
+  .modal-title-link:hover{text-decoration:underline;}
+  .modal-title-link .fs-ic{font-size:13px; opacity:.6;}
   .tag{
     display:inline-block; font-size:11px; font-weight:600; padding:3px 9px; border-radius:999px;
   }
@@ -432,6 +444,9 @@
       <div>
         <div class="modal-title" id="mTitle"></div>
         <div class="modal-sub" id="mSub"></div>
+        <div id="mFactsheetWrap" style="margin-top:6px; display:none;">
+          <a class="modal-title-link" id="mFactsheetLink" href="#" target="_blank" rel="noopener">Ver factsheet <span class="fs-ic">↗</span></a>
+        </div>
       </div>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
@@ -961,6 +976,60 @@ function ordenarConColor(segmentosOriginal){
 let sortKey = "pn", sortDir = -1;
 let charts = {};
 
+/* ============== Factsheets (link al PDF de cada fondo) ==============
+   factsheets.json vive en la raíz del mismo repo/dominio que este HTML
+   (lo mantiene actualizado un GitHub Action mensual, ver
+   scripts/update-factsheets.mjs). Por eso el fetch es a una ruta
+   relativa: en Vercel es same-origin y funciona. Si este HTML se abre
+   suelto desde el disco (doble click, WhatsApp/mail) el fetch va a
+   fallar -no hay same-origin- y los nombres de fondo simplemente
+   quedan sin link, sin romper nada más de la página. */
+let FACTSHEETS_MAP = {}; // nombre normalizado -> URL del PDF
+
+function normFundName(s){
+  return (s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // saca tildes
+    .toLowerCase()
+    .replace(/^balanz\s+/, "")     // el prefijo "Balanz " no siempre está de un lado
+    .replace(/[^a-z0-9]+/g, " ")   // paréntesis, guiones, etc -> espacio
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function factsheetUrlFor(nombre){
+  if(!nombre) return null;
+  // 1) intento con el nombre completo tal cual viene (cubre casos como
+  //    "Latam (SIN Arg)" donde el paréntesis es parte del nombre, no
+  //    una aclaración de categoría).
+  const full = normFundName(nombre);
+  if(FACTSHEETS_MAP[full]) return FACTSHEETS_MAP[full];
+  // 2) si no matcheó, pruebo solo con la parte antes del paréntesis
+  //    (splitNombre ya separa esto para mostrarlo en 2 líneas en la
+  //    tabla) - cubre "Balanz Soberano (Renta Fija en Dólares)" -> "Soberano".
+  const main = normFundName(splitNombre(nombre).main);
+  if(FACTSHEETS_MAP[main]) return FACTSHEETS_MAP[main];
+  return null;
+}
+
+async function cargarFactsheets(){
+  try{
+    const res = await fetch("factsheets.json", { cache: "no-store" });
+    if(!res.ok) return;
+    const json = await res.json();
+    const map = {};
+    Object.keys(json).forEach(k=>{
+      if(k.startsWith("_")) return; // _actualizado, _comentario
+      map[normFundName(k)] = json[k];
+    });
+    FACTSHEETS_MAP = map;
+    render(); // re-renderiza tabla/tarjetas ya con los links resueltos
+  } catch(err){
+    // Sin conexión, archivo no publicado todavía, o HTML abierto en
+    // local sin servidor: se sigue mostrando todo igual, sin links.
+    console.warn("No se pudieron cargar los factsheets:", err.message);
+  }
+}
+
 function fmtMM(v){ return "$" + Math.round(v).toLocaleString("es-AR") + " M"; }
 // Separa "Balanz Soberano (Renta Fija en Dólares)" en principal/paréntesis,
 // para mostrar el paréntesis en una segunda línea más chica en la tabla.
@@ -1039,8 +1108,12 @@ function renderTable(rows){
     const tr = document.createElement("tr");
     tr.onclick = ()=> openModal(f);
     const nombreSplit = splitNombre(f.nombre);
+    const fsUrl = factsheetUrlFor(f.nombre);
+    const nombreHtml = fsUrl
+      ? `<a class="fund-name-link" href="${fsUrl}" target="_blank" rel="noopener" title="Ver factsheet de ${f.nombre}" onclick="event.stopPropagation()">${nombreSplit.main}<span class="fs-ic">↗</span></a>`
+      : nombreSplit.main;
     tr.innerHTML = `
-      <td class="fund-name">${nombreSplit.main}${nombreSplit.paren ? `<div class="fund-name-sub">${nombreSplit.paren}</div>` : ""}</td>
+      <td class="fund-name">${nombreHtml}${nombreSplit.paren ? `<div class="fund-name-sub">${nombreSplit.paren}</div>` : ""}</td>
       <td>${f.moneda}</td>
       <td class="muted-cell">${f.plazo}</td>
       <td>${f.exento? '<span class="tag tag-si">Sí</span>' : '<span class="tag tag-no">No</span>'}</td>
@@ -1059,9 +1132,14 @@ function renderTable(rows){
 /* ============== Tarjetas (vista mobile) ============== */
 function renderCards(rows){
   const wrap = document.getElementById("tableCards");
-  wrap.innerHTML = rows.map((f, i) => `
+  wrap.innerHTML = rows.map((f, i) => {
+    const fsUrl = factsheetUrlFor(f.nombre);
+    const nombreHtml = fsUrl
+      ? `<a class="fund-card-name-link" href="${fsUrl}" target="_blank" rel="noopener" title="Ver factsheet de ${f.nombre}" onclick="event.stopPropagation()">${f.nombre} <span class="fs-ic">↗</span></a>`
+      : f.nombre;
+    return `
     <div class="fund-card" data-idx="${i}">
-      <div class="fund-card-name">${f.nombre}</div>
+      <div class="fund-card-name">${nombreHtml}</div>
       <div class="fund-card-meta">${f.categoria} · Moneda ${f.moneda} · Rescate ${f.plazo}${f.exento?' · Exento BBPP':''}</div>
       <div class="fund-card-grid">
         <div class="fc-item"><div class="l">Rend. 7D</div><div class="v ${f.r7d>0?'pos':f.r7d<0?'neg':''}">${fmtPct(f.r7d)}</div></div>
@@ -1070,7 +1148,8 @@ function renderCards(rows){
         <div class="fc-item"><div class="l">Patrimonio neto</div><div class="v">${fmtMM(f.pn)}</div></div>
       </div>
     </div>
-  `).join("");
+  `;
+  }).join("");
   wrap.querySelectorAll(".fund-card").forEach(el => {
     el.onclick = () => openModal(rows[Number(el.dataset.idx)]);
   });
@@ -1454,6 +1533,15 @@ function openModal(f){
     sub += ` · ${[f.perfilRiesgo, f.horizonte].filter(Boolean).join(" / ")}`;
   }
   document.getElementById("mSub").textContent = sub;
+
+  const fsUrl = factsheetUrlFor(f.nombre);
+  const mFactsheetWrap = document.getElementById("mFactsheetWrap");
+  if(fsUrl){
+    document.getElementById("mFactsheetLink").href = fsUrl;
+    mFactsheetWrap.style.display = "block";
+  } else {
+    mFactsheetWrap.style.display = "none";
+  }
   document.getElementById("mMetrics").innerHTML = `
     <div class="mm"><div class="l">TNA</div><div class="v">${f.tnaTexto||fmtNum(f.tna,"%")}</div></div>
     <div class="mm"><div class="l">TIR</div><div class="v">${f.tirTexto||fmtNum(f.tir,"%")}</div></div>
@@ -1657,6 +1745,7 @@ function buildAssetClassComments(){
 buildFilters();
 buildAssetClassComments();
 render();
+cargarFactsheets();
 
 let resizeTimer;
 window.addEventListener("resize", () => {
