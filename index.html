@@ -982,55 +982,136 @@ let sortKey = "pn", sortDir = -1;
 let charts = {};
 
 /* ============== Factsheets (link al PDF de cada fondo) ==============
-   factsheets.json vive en la raíz del mismo repo/dominio que este HTML
-   (lo mantiene actualizado un GitHub Action mensual, ver
-   scripts/update-factsheets.mjs). Por eso el fetch es a una ruta
-   relativa: en Vercel es same-origin y funciona. Si este HTML se abre
-   suelto desde el disco (doble click, WhatsApp/mail) el fetch va a
-   fallar -no hay same-origin- y los nombres de fondo simplemente
-   quedan sin link, sin romper nada más de la página. */
-let FACTSHEETS_MAP = {}; // nombre normalizado -> URL del PDF
+   Los PDF viven en la carpeta /WEEKLY del repositorio y se suben a mano.
+   Ya no se scrapea fondosbalanz.com.
 
-function normFundName(s){
+   factsheets.json es un INDICE de esa carpeta que regenera solo un GitHub
+   Action en cada push (scripts/index-factsheets.mjs). Hace falta ese indice
+   porque el navegador no puede listar una carpeta en el servidor y las URLs
+   distinguen mayusculas: sin el, no habria como saber si el archivo es
+   "opportunity.esp.pdf" u "Opportunity.esp.pdf", ni que fecha lleva el
+   prefijo este mes.
+
+   Este repo tiene su propia carpeta /WEEKLY y su propio factsheets.json,
+   con la misma estructura que el repo de la calculadora, asi que la base
+   queda vacia y todo se resuelve con rutas relativas (same-origin).
+
+   Si algun dia quisieras dejar de duplicar los PDF y leerlos del otro
+   sitio, alcanza con poner su URL aca (con la barra final). En ese caso ese
+   otro proyecto tiene que devolver el header CORS
+   Access-Control-Allow-Origin en factsheets.json, o el navegador bloquea la
+   lectura del indice (los PDF en si se abrirían igual, porque son links
+   comunes y no un fetch).
+
+   Si el fetch falla (sin conexión, indice no publicado todavía, o el HTML
+   abierto suelto desde el disco) los nombres quedan sin link y no se rompe
+   nada más de la página. */
+const FACTSHEETS_BASE = "";
+
+let FACTSHEETS = [];                     // [{slug, nombre, fecha, url}]
+const FACTSHEET_CACHE = new Map();
+
+// "Balanz Crédito Privado" -> "balanzcreditoprivado"
+function slugFondo(s){
   return (s || "")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // saca tildes
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // saca tildes
     .toLowerCase()
-    .replace(/^balanz\s+/, "")     // el prefijo "Balanz " no siempre está de un lado
-    .replace(/[^a-z0-9]+/g, " ")   // paréntesis, guiones, etc -> espacio
-    .trim()
-    .replace(/\s+/g, " ");
+    .replace(/[^a-z0-9]/g, "");
 }
 
-function factsheetUrlFor(nombre){
+/* Excepciones: fondos cuyo PDF NO se puede deducir del nombre.
+
+   La clave es el nombre del fondo normalizado (podés escribirlo con o sin
+   el prefijo "Balanz") y el valor es el slug del archivo, o sea la parte
+   del medio de "AAAAMMDD.LoQueVaAca.esp.pdf" tambien normalizada. */
+const ALIAS_FACTSHEET = {
+  // El factsheet del Inflation Linked se publica como "Institucional"
+  "inflationlinked": "institucional",
+  // Sin este alias caeria en el factsheet del Latam comun, que es otro fondo
+  "latamexargentina": "latamsinarg",
+  // El Excel abrevia "Rta" y el archivo escribe "Renta" completo
+  "rtafijaestrategica": "rentafijaestrategica",
+};
+
+/* Devuelve el factsheet de un fondo, o null.
+
+   Los nombres del tablero son largos ("Balanz Latam ex Argentina
+   (Sudamericano)") y los de los archivos cortos ("LatamsinArg"), asi que se
+   prueban varias formas del nombre, de la mas especifica a la mas general:
+
+     1. tal cual                      balanzlatamexargentinasudamericano
+     2. sin el prefijo "Balanz"       latamexargentinasudamericano
+     3. sin el parentesis             balanzlatamexargentina
+     4. sin "Balanz" ni parentesis    latamexargentina
+
+   Para cada forma se prueba primero el alias manual y despues la
+   coincidencia exacta. Si ninguna da, se busca el slug de archivo mas largo
+   contenido dentro del nombre (sin parentesis), que resuelve los casos como
+   "Balanz Abierto Infraestructura" -> infraestructura. Se piden 4 caracteres
+   minimo para no enganchar coincidencias sueltas.
+
+   El parentesis se descarta a proposito en las ultimas pasadas: contiene
+   nombres comerciales ("Estrategia III", "Performance III") que pueden
+   colisionar con archivos de OTROS fondos. */
+function buscarFactsheet(nombre){
   if(!nombre) return null;
-  // 1) intento con el nombre completo tal cual viene (cubre casos como
-  //    "Latam (SIN Arg)" donde el paréntesis es parte del nombre, no
-  //    una aclaración de categoría).
-  const full = normFundName(nombre);
-  if(FACTSHEETS_MAP[full]) return FACTSHEETS_MAP[full];
-  // 2) si no matcheó, pruebo solo con la parte antes del paréntesis
-  //    (splitNombre ya separa esto para mostrarlo en 2 líneas en la
-  //    tabla) - cubre "Balanz Soberano (Renta Fija en Dólares)" -> "Soberano".
-  const main = normFundName(splitNombre(nombre).main);
-  if(FACTSHEETS_MAP[main]) return FACTSHEETS_MAP[main];
-  return null;
+  if(FACTSHEET_CACHE.has(nombre)) return FACTSHEET_CACHE.get(nombre);
+
+  const sinParen = splitNombre(nombre).main;
+  const sinBalanz = (s)=> s.replace(/^balanz/, "");
+  const full = slugFondo(nombre), base = slugFondo(sinParen);
+  const candidatos = [full, sinBalanz(full), base, sinBalanz(base)];
+
+  let hallado = null;
+  for(const c of candidatos){
+    if(!c) continue;
+    const alias = ALIAS_FACTSHEET[c];
+    if(alias){ hallado = FACTSHEETS.find(f => f.slug === alias) || null; }
+    if(!hallado) hallado = FACTSHEETS.find(f => f.slug === c) || null;
+    if(hallado) break;
+  }
+
+  if(!hallado){
+    const dentro = sinBalanz(base);
+    let mejor = null;
+    for(const f of FACTSHEETS){
+      if(!f.slug || f.slug.length < 4) continue;
+      if(!dentro.includes(f.slug)) continue;
+      if(!mejor || f.slug.length > mejor.slug.length) mejor = f;
+    }
+    hallado = mejor;
+  }
+
+  FACTSHEET_CACHE.set(nombre, hallado);
+  return hallado;
+}
+
+// Devuelve la URL del PDF, o null. Es lo que consumen la tabla, las tarjetas y el modal.
+function factsheetUrlFor(nombre){
+  const fs = buscarFactsheet(nombre);
+  return fs ? FACTSHEETS_BASE + fs.url : null;
+}
+
+// AAAAMMDD -> "31/07/2026", para el tooltip
+function fechaFactsheetFor(nombre){
+  const fs = buscarFactsheet(nombre);
+  const f = fs && fs.fecha;
+  return (f && /^\d{8}$/.test(f)) ? `${f.slice(6,8)}/${f.slice(4,6)}/${f.slice(0,4)}` : null;
 }
 
 async function cargarFactsheets(){
   try{
-    const res = await fetch("factsheets.json", { cache: "no-store" });
+    const res = await fetch(FACTSHEETS_BASE + "factsheets.json", { cache: "no-store" });
     if(!res.ok) return;
     const json = await res.json();
-    const map = {};
-    Object.keys(json).forEach(k=>{
-      if(k.startsWith("_")) return; // _actualizado, _comentario
-      map[normFundName(k)] = json[k];
-    });
-    FACTSHEETS_MAP = map;
+    FACTSHEETS = (json && Array.isArray(json.archivos)) ? json.archivos : [];
+    FACTSHEET_CACHE.clear();
+    if(!FACTSHEETS.length){
+      console.warn("factsheets.json está vacío o tiene un formato viejo: los fondos quedan sin link.");
+      return;
+    }
     render(); // re-renderiza tabla/tarjetas ya con los links resueltos
   } catch(err){
-    // Sin conexión, archivo no publicado todavía, o HTML abierto en
-    // local sin servidor: se sigue mostrando todo igual, sin links.
     console.warn("No se pudieron cargar los factsheets:", err.message);
   }
 }
@@ -1115,7 +1196,7 @@ function renderTable(rows){
     const nombreSplit = splitNombre(f.nombre);
     const fsUrl = factsheetUrlFor(f.nombre);
     const nombreHtml = fsUrl
-      ? `<a class="fund-name-link" href="${fsUrl}" target="_blank" rel="noopener" title="Ver factsheet de ${f.nombre}" onclick="event.stopPropagation()">${nombreSplit.main}<span class="fs-ic">↗</span></a>`
+      ? `<a class="fund-name-link" href="${fsUrl}" target="_blank" rel="noopener" title="Ver factsheet de ${f.nombre}${fechaFactsheetFor(f.nombre) ? ` (al ${fechaFactsheetFor(f.nombre)})` : ``}" onclick="event.stopPropagation()">${nombreSplit.main}<span class="fs-ic">↗</span></a>`
       : nombreSplit.main;
     tr.innerHTML = `
       <td class="fund-name">${nombreHtml}${nombreSplit.paren ? `<div class="fund-name-sub">${nombreSplit.paren}</div>` : ""}</td>
@@ -1140,7 +1221,7 @@ function renderCards(rows){
   wrap.innerHTML = rows.map((f, i) => {
     const fsUrl = factsheetUrlFor(f.nombre);
     const nombreHtml = fsUrl
-      ? `<a class="fund-card-name-link" href="${fsUrl}" target="_blank" rel="noopener" title="Ver factsheet de ${f.nombre}" onclick="event.stopPropagation()">${f.nombre} <span class="fs-ic">↗</span></a>`
+      ? `<a class="fund-card-name-link" href="${fsUrl}" target="_blank" rel="noopener" title="Ver factsheet de ${f.nombre}${fechaFactsheetFor(f.nombre) ? ` (al ${fechaFactsheetFor(f.nombre)})` : ``}" onclick="event.stopPropagation()">${f.nombre} <span class="fs-ic">↗</span></a>`
       : f.nombre;
     return `
     <div class="fund-card" data-idx="${i}">
