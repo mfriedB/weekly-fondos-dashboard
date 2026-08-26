@@ -1,0 +1,24 @@
+{
+  "name": "weekly-fondos-dashboard",
+  "version": "1.0.0",
+  "description": "Weekly Fondos Balanz Dashboard",
+  "main": "index.html",
+  "type": "module",
+  "scripts": {
+    "index": "node scripts/index-factsheets.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mfriedB/weekly-fondos-dashboard.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mfriedB/weekly-fondos-dashboard/issues"
+  },
+  "homepage": "https://github.com/mfriedB/weekly-fondos-dashboard#readme",
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
+  }
+}
