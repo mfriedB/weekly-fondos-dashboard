@@ -1034,7 +1034,25 @@ const ALIAS_FACTSHEET = {
   "latamexargentina": "latamsinarg",
   // El Excel abrevia "Rta" y el archivo escribe "Renta" completo
   "rtafijaestrategica": "rentafijaestrategica",
+  // El archivo se publica sin el "Pesos" del nombre del fondo
+  "longpesos": "long",
+  // El archivo abrevia "Renta Fija" como "RF"
+  "rentafijaglobal": "rfglobal",
 };
+
+/* Fondos que hoy NO tienen factsheet publicado en /WEEKLY.
+
+   Hace falta declararlos porque si no el fallback por parecido les
+   engancha el PDF de otro fondo: "Balanz Latam Selection" no tiene
+   factsheet propio y terminaba abriendo el del "Balanz Latam
+   (Estrategia III)", que es otro fondo.
+
+   Se escriben normalizados (minusculas, sin espacios ni tildes), con o
+   sin el prefijo "Balanz". Cuando el fondo tenga su PDF subido, se
+   borra la linea de aca y el link aparece solo. */
+const SIN_FACTSHEET = new Set([
+  "latamselection",
+]);
 
 /* Devuelve el factsheet de un fondo, o null.
 
@@ -1049,9 +1067,15 @@ const ALIAS_FACTSHEET = {
 
    Para cada forma se prueba primero el alias manual y despues la
    coincidencia exacta. Si ninguna da, se busca el slug de archivo mas largo
-   contenido dentro del nombre (sin parentesis), que resuelve los casos como
+   con el que TERMINE el nombre (sin parentesis), que resuelve los casos como
    "Balanz Abierto Infraestructura" -> infraestructura. Se piden 4 caracteres
    minimo para no enganchar coincidencias sueltas.
+
+   Ojo: el fallback va anclado al final a proposito. Si se buscara el slug
+   en cualquier posicion, un fondo como "Balanz Latam Selection" se quedaria
+   con el archivo "Latam", que es de otro fondo. Los fondos cuyo archivo
+   coincide con el ARRANQUE del nombre (por ej. "Long Pesos" -> "Long") van
+   resueltos por ALIAS_FACTSHEET, no por el fallback.
 
    El parentesis se descarta a proposito en las ultimas pasadas: contiene
    nombres comerciales ("Estrategia III", "Performance III") que pueden
@@ -1064,6 +1088,12 @@ function buscarFactsheet(nombre){
   const sinBalanz = (s)=> s.replace(/^balanz/, "");
   const full = slugFondo(nombre), base = slugFondo(sinParen);
   const candidatos = [full, sinBalanz(full), base, sinBalanz(base)];
+
+  // Fondos declarados sin factsheet: no se busca nada, quedan sin link.
+  if(candidatos.some(c => SIN_FACTSHEET.has(c))){
+    FACTSHEET_CACHE.set(nombre, null);
+    return null;
+  }
 
   let hallado = null;
   for(const c of candidatos){
@@ -1079,7 +1109,7 @@ function buscarFactsheet(nombre){
     let mejor = null;
     for(const f of FACTSHEETS){
       if(!f.slug || f.slug.length < 4) continue;
-      if(!dentro.includes(f.slug)) continue;
+      if(!dentro.endsWith(f.slug)) continue;
       if(!mejor || f.slug.length > mejor.slug.length) mejor = f;
     }
     hallado = mejor;
