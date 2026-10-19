@@ -1425,6 +1425,37 @@ function renderKPIs(rows){
 }
 
 /* ============== Gráficos ============== */
+/* Paleta de los gráficos (solo barras; el texto de la tabla sigue usando
+   --pos / --neg, más oscuros, para que se lea bien sobre blanco).
+   - Rendimiento 7d: verde agua y rojo coral, más suaves que los originales
+     (#1E8E5A / #C6433A) para que las semanas negativas no se vean alarmantes.
+   - Top 10: los fondos en dólares van en verde "billete", un verde oliva
+     hacia el amarillo, bien separado en tono del verde agua de al lado. */
+const COLOR_REND_POS = "#4FC1A6";   // verde agua
+const COLOR_REND_NEG = "#E8897F";   // rojo coral suave
+const COLOR_PN_ARS   = "#2E8BC9";   // azul Balanz (fondos en $)
+const COLOR_PN_USD   = "#5E8C4A";   // verde billete de dólar (fondos en USD)
+
+function colorRend(v){ return v >= 0 ? COLOR_REND_POS : COLOR_REND_NEG; }
+function colorPN(f){ return f.moneda === "USD" ? COLOR_PN_USD : COLOR_PN_ARS; }
+
+/* Leyenda del Top 10: solo cuando conviven fondos en $ y en USD (si el
+   filtro deja una sola moneda, el color no necesita explicación). */
+function leyendaTop10(top10, F){
+  const hayARS = top10.some(f=>f.moneda !== "USD"), hayUSD = top10.some(f=>f.moneda === "USD");
+  return {
+    display: hayARS && hayUSD,
+    position: "top", align: "end",
+    onClick: null,
+    labels: {
+      boxWidth: 12, boxHeight: 12, font:{size:F},
+      generateLabels: ()=>[
+        {text:"Fondos en $",   fillStyle:COLOR_PN_ARS, strokeStyle:COLOR_PN_ARS, lineWidth:0},
+        {text:"Fondos en USD", fillStyle:COLOR_PN_USD, strokeStyle:COLOR_PN_USD, lineWidth:0}
+      ]
+    }
+  };
+}
 function renderCharts(rows){
   const isMobile = window.innerWidth < 640;
   const top10 = rows.slice().sort((a,b)=>b.pn-a.pn).slice(0,10);
@@ -1436,14 +1467,14 @@ function renderCharts(rows){
     type:"bar",
     data:{
       labels: top10.map(f=>f.nombre),
-      datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor:"#2E8BC9", borderRadius:4 }]
+      datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor: top10.map(colorPN), borderRadius:4 }]
     },
     options:{
       indexAxis:"y",
       responsive:true,
       maintainAspectRatio:false,
       devicePixelRatio: Math.max(window.devicePixelRatio || 1, 2),
-      plugins:{legend:{display:false}, tooltip:{callbacks:{ label:(ctx)=>fmtMMVista(ctx.parsed.x, usd) }}},
+      plugins:{legend:leyendaTop10(top10, isMobile?10:12), tooltip:{callbacks:{ label:(ctx)=>fmtMMVista(ctx.parsed.x, usd) }}},
       scales:{ x:{ticks:{callback:v=>tickPN(v, usd), font:{size:isMobile?9:12}}}, y:{ticks:{font:{size:isMobile?9:12}}} }
     }
   });
@@ -1455,7 +1486,7 @@ function renderCharts(rows){
     type:"bar",
     data:{
       labels: sorted.map(f=>f.nombre),
-      datasets:[{ data: sorted.map(f=>f.r7d), backgroundColor: sorted.map(f=> f.r7d>=0 ? "#1E8E5A" : "#C6433A"), borderRadius:4 }]
+      datasets:[{ data: sorted.map(f=>f.r7d), backgroundColor: sorted.map(f=> colorRend(f.r7d)), borderRadius:4 }]
     },
     options:{
       responsive:true,
@@ -1506,10 +1537,10 @@ function cfgTop10(rows, F){
   return {
     type:"bar",
     data:{ labels: top10.map(f=>f.nombre),
-           datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor:"#2E8BC9", borderRadius:5 }] },
+           datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor: top10.map(colorPN), borderRadius:5 }] },
     options:{
       indexAxis:"y", responsive:false, animation:false,
-      plugins:{legend:{display:false}, tooltip:{enabled:false}},
+      plugins:{legend:leyendaTop10(top10, F), tooltip:{enabled:false}},
       layout:{padding:{top:4, right:18, bottom:2, left:2}},
       scales:{
         x:{ ticks:{ callback:v=>tickPN(v, usd), font:{size:F} }, grid:{color:"#EEF1F4"} },
@@ -1525,7 +1556,7 @@ function cfgRend(rows, F, Fx){
     type:"bar",
     data:{ labels: sorted.map(f=>f.nombre),
            datasets:[{ data: sorted.map(f=>f.r7d),
-                       backgroundColor: sorted.map(f=> f.r7d>=0 ? "#1E8E5A" : "#C6433A"),
+                       backgroundColor: sorted.map(f=> colorRend(f.r7d)),
                        borderRadius:4 }] },
     options:{
       responsive:false, animation:false,
