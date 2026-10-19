@@ -125,6 +125,10 @@
   }
   .chart-card h3{margin:0 0 10px; font-size:13px; font-weight:600; color:var(--navy); text-transform:uppercase; letter-spacing:.4px;}
   .chart-canvas-wrap{position:relative; height:420px;}
+  /* Encabezado de gráfico con nota a la derecha (TC MEP usado al dolarizar) */
+  .chart-head{display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap;}
+  .tc-note{font-size:11.5px; color:var(--muted); margin-bottom:10px; white-space:nowrap;}
+  .tc-note.warn{color:#B8790F;}
 
   .table-card{
     background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
@@ -405,7 +409,10 @@
 
   <div class="charts-row">
     <div class="chart-card">
-      <h3>Top 10 por patrimonio neto (ARS MM)</h3>
+      <div class="chart-head">
+        <h3 id="titlePatrimonio">Top 10 por patrimonio neto (ARS MM)</h3>
+        <span class="tc-note" id="tcNote"></span>
+      </div>
       <div class="chart-canvas-wrap"><canvas id="chartPatrimonio"></canvas></div>
     </div>
     <div class="chart-card">
@@ -1150,6 +1157,122 @@ async function cargarFactsheets(){
 }
 
 function fmtMM(v){ return "$" + Math.round(v).toLocaleString("es-AR") + " M"; }
+
+/* ============== Tipo de cambio MEP (dolarización con filtro USD) ==============
+   Cuando el filtro de moneda está en "USD", el Top 10 por patrimonio y el KPI
+   "Mayor patrimonio (ex. Money Market)" se muestran en USD MM. El patrimonio
+   viene SIEMPRE en millones de ARS (también en los fondos en dólares), así que
+   se divide por el MEP (venta) del día del reporte (REPORT_DATE).
+
+   Fuente: ArgentinaDatos (api.argentinadatos.com), que guarda la serie
+   histórica diaria del dólar "bolsa" (MEP) y se puede pedir por fecha:
+     /v1/cotizaciones/dolares/bolsa/AAAA/MM/DD -> {casa, compra, venta, fecha}
+
+   Orden de intento:
+     1. TC_MEP_MANUAL, si no es null (permite fijarlo desde la planilla/VBA
+        y no depender de nadie: si se completa, NO se consulta la API).
+     2. Caché del navegador para esa fecha (no se vuelve a pedir en cada visita).
+     3. ArgentinaDatos para la fecha del reporte. Si ese día no hay dato
+        (feriado / fin de semana) se retrocede hasta 7 días y se avisa la
+        fecha efectivamente usada.
+   Si todo falla, la vista USD sigue mostrando ARS y lo indica en el gráfico. */
+const TC_MEP_MANUAL = null;          // ej. 1536  -> fuerza ese valor
+const TC_MEP_API = "https://api.argentinadatos.com/v1/cotizaciones/dolares/bolsa/";
+let TC_MEP = null;                   // {valor, fecha:"DD/MM/AAAA", fuente}
+let TC_MEP_ESTADO = "cargando";      // "cargando" | "ok" | "error"
+
+function parseFechaDMY(s){
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s || "");
+  return m ? new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])) : null;
+}
+function fmtDMY(d){
+  return String(d.getDate()).padStart(2,"0") + "/" + String(d.getMonth()+1).padStart(2,"0") + "/" + d.getFullYear();
+}
+
+async function cargarTCMep(){
+  try{
+    if(typeof TC_MEP_MANUAL === "number" && TC_MEP_MANUAL > 0){
+      TC_MEP = { valor: TC_MEP_MANUAL, fecha: REPORT_DATE, fuente: "manual" };
+      TC_MEP_ESTADO = "ok"; return;
+    }
+    const base = parseFechaDMY(REPORT_DATE);
+    if(!base) throw new Error("REPORT_DATE con formato inesperado: " + REPORT_DATE);
+
+    const cacheKey = "tcMep:" + REPORT_DATE;
+    try{
+      const c = JSON.parse(localStorage.getItem(cacheKey) || "null");
+      if(c && c.valor > 0){ TC_MEP = c; TC_MEP_ESTADO = "ok"; return; }
+    } catch(e){ /* storage bloqueado: se sigue con la API */ }
+
+    for(let i = 0; i <= 7; i++){
+      const d = new Date(base); d.setDate(d.getDate() - i);
+      const ruta = d.getFullYear() + "/" + String(d.getMonth()+1).padStart(2,"0") + "/" + String(d.getDate()).padStart(2,"0");
+      let res;
+      try{ res = await fetch(TC_MEP_API + ruta, { cache: "no-store" }); }
+      catch(e){ throw new Error("sin conexión con ArgentinaDatos (" + e.message + ")"); }
+      if(res.status === 404) continue;                 // día sin cotización
+      if(!res.ok) throw new Error("ArgentinaDatos respondió " + res.status);
+      const j = await res.json();
+      const v = Number(j && (j.venta ?? j.compra));
+      if(!(v > 0)) continue;
+      TC_MEP = { valor: v, fecha: fmtDMY(d), fuente: "ArgentinaDatos" };
+      TC_MEP_ESTADO = "ok";
+      try{ localStorage.setItem(cacheKey, JSON.stringify(TC_MEP)); } catch(e){}
+      return;
+    }
+    throw new Error("sin cotización MEP en los 7 días previos a " + REPORT_DATE);
+  } catch(err){
+    console.warn("No se pudo obtener el TC MEP:", err.message);
+    TC_MEP = null; TC_MEP_ESTADO = "error";
+  } finally {
+    render();
+  }
+}
+
+// true si el filtro de moneda está en USD y hay TC disponible
+function vistaUSD(){
+  const chip = document.querySelector("#monedaChips .chip-btn.active");
+  return !!(chip && chip.dataset.val === "USD" && TC_MEP && TC_MEP.valor > 0);
+}
+// Patrimonio en la moneda de la vista (ARS MM o USD MM)
+function pnVista(v, usd){ return (usd && v != null) ? v / TC_MEP.valor : v; }
+// Formato de patrimonio según moneda. En USD los fondos chicos quedan por
+// debajo de 1 M, así que se suman decimales para que no figuren como "0".
+function fmtMMVista(v, usd){
+  if(!usd) return fmtMM(v);
+  const dec = v < 10 ? 2 : (v < 100 ? 1 : 0);
+  return "US$ " + v.toLocaleString("es-AR", {minimumFractionDigits:dec, maximumFractionDigits:dec}) + " M";
+}
+// Eje X: en ARS se abrevia en miles ("800k"); en USD los valores ya son chicos
+function tickPN(v, usd){ return usd ? v.toLocaleString("es-AR") : (v/1000).toLocaleString("es-AR")+"k"; }
+function tituloTop10(usd){ return "Top 10 por patrimonio neto (" + (usd ? "USD" : "ARS") + " MM)"; }
+function textoTC(){
+  if(!TC_MEP) return "";
+  const v = TC_MEP.valor.toLocaleString("es-AR", {minimumFractionDigits:2, maximumFractionDigits:2});
+  return "TC MEP $" + v + " (" + TC_MEP.fecha + ")";
+}
+
+// Título y nota del gráfico Top 10 según el filtro de moneda
+function renderTCNote(){
+  const chip = document.querySelector("#monedaChips .chip-btn.active");
+  const pideUSD = chip && chip.dataset.val === "USD";
+  const usd = vistaUSD();
+  const note = document.getElementById("tcNote");
+  document.getElementById("titlePatrimonio").textContent = tituloTop10(usd);
+  note.classList.remove("warn");
+  note.title = "";
+  if(!pideUSD){ note.textContent = ""; return; }
+  if(usd){
+    note.textContent = textoTC();
+    note.title = TC_MEP.fuente === "manual" ? "Tipo de cambio cargado manualmente" : "Dólar MEP (venta) — fuente: ArgentinaDatos";
+    if(TC_MEP.fecha !== REPORT_DATE) note.title += ". Sin dato para " + REPORT_DATE + ", se usa el último hábil previo.";
+  } else if(TC_MEP_ESTADO === "cargando"){
+    note.textContent = "Cargando TC MEP…";
+  } else {
+    note.textContent = "TC MEP no disponible: valores en ARS";
+    note.classList.add("warn");
+  }
+}
 // Separa "Balanz Soberano (Renta Fija en Dólares)" en principal/paréntesis,
 // para mostrar el paréntesis en una segunda línea más chica en la tabla.
 function splitNombre(nombre){
@@ -1283,7 +1406,10 @@ function renderKPIs(rows){
   const sinMoneyMarket = rows.filter(f=>f.categoria !== "Money Market");
   if(sinMoneyMarket.length){
     const top = sinMoneyMarket.reduce((a,b)=> a.pn>b.pn?a:b);
-    document.getElementById("kpiMaxPN").textContent = fmtMM(top.pn);
+    const usd = vistaUSD();
+    const el = document.getElementById("kpiMaxPN");
+    el.textContent = fmtMMVista(pnVista(top.pn, usd), usd);
+    el.title = usd ? fmtMM(top.pn) + " convertido a " + textoTC() : "";
     document.getElementById("kpiMaxPNName").textContent = top.nombre;
   } else {
     document.getElementById("kpiMaxPN").textContent = "-";
@@ -1302,21 +1428,23 @@ function renderKPIs(rows){
 function renderCharts(rows){
   const isMobile = window.innerWidth < 640;
   const top10 = rows.slice().sort((a,b)=>b.pn-a.pn).slice(0,10);
+  const usd = vistaUSD();
+  renderTCNote();
   const ctx1 = document.getElementById("chartPatrimonio");
   if(charts.pn) charts.pn.destroy();
   charts.pn = new Chart(ctx1, {
     type:"bar",
     data:{
       labels: top10.map(f=>f.nombre),
-      datasets:[{ data: top10.map(f=>f.pn), backgroundColor:"#2E8BC9", borderRadius:4 }]
+      datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor:"#2E8BC9", borderRadius:4 }]
     },
     options:{
       indexAxis:"y",
       responsive:true,
       maintainAspectRatio:false,
       devicePixelRatio: Math.max(window.devicePixelRatio || 1, 2),
-      plugins:{legend:{display:false}, tooltip:{callbacks:{ label:(ctx)=>"$"+Math.round(ctx.parsed.x).toLocaleString("es-AR")+" M" }}},
-      scales:{ x:{ticks:{callback:v=>(v/1000).toLocaleString("es-AR")+"k", font:{size:isMobile?9:12}}}, y:{ticks:{font:{size:isMobile?9:12}}} }
+      plugins:{legend:{display:false}, tooltip:{callbacks:{ label:(ctx)=>fmtMMVista(ctx.parsed.x, usd) }}},
+      scales:{ x:{ticks:{callback:v=>tickPN(v, usd), font:{size:isMobile?9:12}}}, y:{ticks:{font:{size:isMobile?9:12}}} }
     }
   });
 
@@ -1374,16 +1502,17 @@ async function chartToImage(cfg, wPx, hPx){
 
 function cfgTop10(rows, F){
   const top10 = rows.slice().sort((a,b)=>b.pn-a.pn).slice(0,10);
+  const usd = vistaUSD();
   return {
     type:"bar",
     data:{ labels: top10.map(f=>f.nombre),
-           datasets:[{ data: top10.map(f=>f.pn), backgroundColor:"#2E8BC9", borderRadius:5 }] },
+           datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor:"#2E8BC9", borderRadius:5 }] },
     options:{
       indexAxis:"y", responsive:false, animation:false,
       plugins:{legend:{display:false}, tooltip:{enabled:false}},
       layout:{padding:{top:4, right:18, bottom:2, left:2}},
       scales:{
-        x:{ ticks:{ callback:v=>(v/1000).toLocaleString("es-AR")+"k", font:{size:F} }, grid:{color:"#EEF1F4"} },
+        x:{ ticks:{ callback:v=>tickPN(v, usd), font:{size:F} }, grid:{color:"#EEF1F4"} },
         y:{ ticks:{font:{size:F}}, grid:{display:false} }
       }
     }
@@ -1439,7 +1568,7 @@ function pdfKPIs(doc, y, h, rows){
   const items = [
     ["PATRIMONIO TOTAL BALANZ", fmtMM(total), 'Incluye "otros fondos" sin apertura'],
     ["FONDOS PUBLICADOS", String(rows.length), "de " + FONDOS.length + " en total"],
-    ["MAYOR PATRIMONIO (EX. MONEY MARKET)", exMM ? fmtMM(exMM.pn) : "—", exMM ? exMM.nombre : ""],
+    ["MAYOR PATRIMONIO (EX. MONEY MARKET)", exMM ? fmtMMVista(pnVista(exMM.pn, vistaUSD()), vistaUSD()) : "—", exMM ? exMM.nombre : ""],
     ["MEJOR YTD (FILTRADO)", bestYtd ? fmtPct(bestYtd.ytd) : "—", bestYtd ? bestYtd.nombre : ""]
   ];
   const gap = 3, w = (PDF_W - 2*PDF_M - 3*gap) / 4;
@@ -1514,7 +1643,7 @@ async function exportarPDF(){
     const img1 = await chartToImage(cfgTop10(rows, 15), px, Math.round(px*(h1-8)/(cw-4)));
     const img2 = await chartToImage(cfgRend(rows, 14, 11), px, Math.round(px*(h2-8)/(cw-4)));
 
-    pdfChartBlock(doc, PDF_M, cTop, cw, h1, "Top 10 por patrimonio neto (ARS MM)", img1);
+    pdfChartBlock(doc, PDF_M, cTop, cw, h1, tituloTop10(vistaUSD()) + (vistaUSD() ? "  ·  " + textoTC() : ""), img1);
     pdfChartBlock(doc, PDF_M, cTop+h1+gap, cw, h2, "Rendimiento 7 días (%)", img2);
 
     /* ---------- Hoja 2: comentario de asset class + tabla completa ---------- */
@@ -1949,6 +2078,7 @@ buildFilters();
 buildAssetClassComments();
 render();
 cargarFactsheets();
+cargarTCMep();
 
 let resizeTimer;
 window.addEventListener("resize", () => {
