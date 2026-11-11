@@ -1234,8 +1234,53 @@ function vistaUSD(){
   const chip = document.querySelector("#monedaChips .chip-btn.active");
   return !!(chip && chip.dataset.val === "USD" && TC_MEP && TC_MEP.valor > 0);
 }
-// Patrimonio en la moneda de la vista (ARS MM o USD MM)
-function pnVista(v, usd){ return (usd && v != null) ? v / TC_MEP.valor : v; }
+// Fondos que suscriben en dólar cable: su patrimonio en ARS está valuado al
+// contado con liquidación (CCL), no al MEP, así que en la vista USD se dividen
+// por el CCL (venta) del día del reporte. Si se suma un fondo cable nuevo,
+// agregar acá su NombreCanonico (el mismo de map_Fondos). Si el CCL no está
+// disponible, esos fondos caen al MEP como el resto.
+const FONDOS_CABLE = ["Balanz Latam ex Argentina (Sudamericano)", "Balanz Renta Fija Global", "Balanz Global Equity"];
+const TC_CCL_MANUAL = null;          // ej. 1680  -> fuerza ese valor
+const TC_CCL_API = "https://api.argentinadatos.com/v1/cotizaciones/dolares/contadoconliqui/";
+let TC_CCL = null;                   // {valor, fecha:"DD/MM/AAAA", fuente}
+function esCable(f){ return !!(f && FONDOS_CABLE.indexOf(f.nombre) !== -1); }
+async function cargarTCCcl(){
+  try{
+    if(typeof TC_CCL_MANUAL === "number" && TC_CCL_MANUAL > 0){
+      TC_CCL = { valor: TC_CCL_MANUAL, fecha: REPORT_DATE, fuente: "manual" }; return;
+    }
+    const base = parseFechaDMY(REPORT_DATE);
+    if(!base) throw new Error("REPORT_DATE con formato inesperado: " + REPORT_DATE);
+    const cacheKey = "tcCcl:" + REPORT_DATE;
+    try{
+      const c = JSON.parse(localStorage.getItem(cacheKey) || "null");
+      if(c && c.valor > 0){ TC_CCL = c; return; }
+    } catch(e){ /* storage bloqueado: se sigue con la API */ }
+    for(let i = 0; i <= 7; i++){
+      const d = new Date(base); d.setDate(d.getDate() - i);
+      const ruta = d.getFullYear() + "/" + String(d.getMonth()+1).padStart(2,"0") + "/" + String(d.getDate()).padStart(2,"0");
+      const res = await fetch(TC_CCL_API + ruta, { cache: "no-store" });
+      if(res.status === 404) continue;                 // día sin cotización
+      if(!res.ok) throw new Error("ArgentinaDatos respondió " + res.status);
+      const j = await res.json();
+      const v = Number(j && (j.venta ?? j.compra));
+      if(!(v > 0)) continue;
+      TC_CCL = { valor: v, fecha: fmtDMY(d), fuente: "ArgentinaDatos" };
+      try{ localStorage.setItem(cacheKey, JSON.stringify(TC_CCL)); } catch(e){}
+      return;
+    }
+    throw new Error("sin cotización CCL en los 7 días previos a " + REPORT_DATE);
+  } catch(err){
+    console.warn("No se pudo obtener el TC CCL (los fondos cable usan MEP):", err.message);
+    TC_CCL = null;
+  } finally {
+    render();
+  }
+}
+// Tipo de cambio que corresponde a cada fondo en la vista USD
+function tcDe(f){ return (esCable(f) && TC_CCL && TC_CCL.valor > 0) ? TC_CCL.valor : TC_MEP.valor; }
+// Patrimonio del fondo en la moneda de la vista (ARS MM o USD MM)
+function pnVista(f, usd){ const v = f ? f.pn : null; return (usd && v != null) ? v / tcDe(f) : v; }
 // Formato de patrimonio según moneda. En USD los fondos chicos quedan por
 // debajo de 1 M, así que se suman decimales para que no figuren como "0".
 function fmtMMVista(v, usd){
@@ -1249,7 +1294,9 @@ function tituloTop10(usd){ return "Top 10 por patrimonio neto (" + (usd ? "USD" 
 function textoTC(){
   if(!TC_MEP) return "";
   const v = TC_MEP.valor.toLocaleString("es-AR", {minimumFractionDigits:2, maximumFractionDigits:2});
-  return "TC MEP $" + v + " (" + TC_MEP.fecha + ")";
+  let t = "TC MEP $" + v + " (" + TC_MEP.fecha + ")";
+  if(TC_CCL && TC_CCL.valor > 0) t += " · CCL $" + TC_CCL.valor.toLocaleString("es-AR", {minimumFractionDigits:2, maximumFractionDigits:2}) + " (fondos cable)";
+  return t;
 }
 
 // Título y nota del gráfico Top 10 según el filtro de moneda
@@ -1264,7 +1311,7 @@ function renderTCNote(){
   if(!pideUSD){ note.textContent = ""; return; }
   if(usd){
     note.textContent = textoTC();
-    note.title = TC_MEP.fuente === "manual" ? "Tipo de cambio cargado manualmente" : "Dólar MEP (venta) — fuente: ArgentinaDatos";
+    note.title = TC_MEP.fuente === "manual" ? "Tipo de cambio cargado manualmente" : "Dólar MEP (venta) — fuente: ArgentinaDatos" + (TC_CCL ? ". Fondos en dólar cable: CCL (venta)" : "");
     if(TC_MEP.fecha !== REPORT_DATE) note.title += ". Sin dato para " + REPORT_DATE + ", se usa el último hábil previo.";
   } else if(TC_MEP_ESTADO === "cargando"){
     note.textContent = "Cargando TC MEP…";
@@ -1408,7 +1455,7 @@ function renderKPIs(rows){
     const top = sinMoneyMarket.reduce((a,b)=> a.pn>b.pn?a:b);
     const usd = vistaUSD();
     const el = document.getElementById("kpiMaxPN");
-    el.textContent = fmtMMVista(pnVista(top.pn, usd), usd);
+    el.textContent = fmtMMVista(pnVista(top, usd), usd);
     el.title = usd ? fmtMM(top.pn) + " convertido a " + textoTC() : "";
     document.getElementById("kpiMaxPNName").textContent = top.nombre;
   } else {
@@ -1467,7 +1514,7 @@ function renderCharts(rows){
     type:"bar",
     data:{
       labels: top10.map(f=>f.nombre),
-      datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor: top10.map(colorPN), borderRadius:4 }]
+      datasets:[{ data: top10.map(f=>pnVista(f, usd)), backgroundColor: top10.map(colorPN), borderRadius:4 }]
     },
     options:{
       indexAxis:"y",
@@ -1537,7 +1584,7 @@ function cfgTop10(rows, F){
   return {
     type:"bar",
     data:{ labels: top10.map(f=>f.nombre),
-           datasets:[{ data: top10.map(f=>pnVista(f.pn, usd)), backgroundColor: top10.map(colorPN), borderRadius:5 }] },
+           datasets:[{ data: top10.map(f=>pnVista(f, usd)), backgroundColor: top10.map(colorPN), borderRadius:5 }] },
     options:{
       indexAxis:"y", responsive:false, animation:false,
       plugins:{legend:leyendaTop10(top10, F), tooltip:{enabled:false}},
@@ -1599,7 +1646,7 @@ function pdfKPIs(doc, y, h, rows){
   const items = [
     ["PATRIMONIO TOTAL BALANZ", fmtMM(total), 'Incluye "otros fondos" sin apertura'],
     ["FONDOS PUBLICADOS", String(rows.length), "de " + FONDOS.length + " en total"],
-    ["MAYOR PATRIMONIO (EX. MONEY MARKET)", exMM ? fmtMMVista(pnVista(exMM.pn, vistaUSD()), vistaUSD()) : "—", exMM ? exMM.nombre : ""],
+    ["MAYOR PATRIMONIO (EX. MONEY MARKET)", exMM ? fmtMMVista(pnVista(exMM, vistaUSD()), vistaUSD()) : "—", exMM ? exMM.nombre : ""],
     ["MEJOR YTD (FILTRADO)", bestYtd ? fmtPct(bestYtd.ytd) : "—", bestYtd ? bestYtd.nombre : ""]
   ];
   const gap = 3, w = (PDF_W - 2*PDF_M - 3*gap) / 4;
@@ -2110,6 +2157,7 @@ buildAssetClassComments();
 render();
 cargarFactsheets();
 cargarTCMep();
+cargarTCCcl();
 
 let resizeTimer;
 window.addEventListener("resize", () => {
